@@ -1,14 +1,18 @@
 """
 Mini Companion - реагує на рухи миші та зміни вікна
 Сумісний з Python 3.14+
+Версія з PNG емоціями і режимом "утримування"
 """
 
 import threading
 import time
 import tkinter as tk
+from tkinter import PhotoImage
 from pynput import mouse
-from typing import Tuple, Optional
+from typing import Optional, Dict
 import sys
+import os
+from pathlib import Path
 
 try:
     import pygetwindow as gw
@@ -19,24 +23,30 @@ except ImportError:
 
 
 class MiniCompanion:
-    """Міні-компаньйон що реагує на курсор і вікна"""
+    """Міні-компаньйон що реагує на утримування та вікна"""
     
-    # Емодзі для різних станів
-    FACES = {
-        "idle": "🙂",
-        "watching": "👀",
-        "click": "😄",
-        "window": "🪟",
-        "thinking": "🤔",
-        "surprised": "😮",
-        "happy": "😊",
-        "yawn": "😴"
-    }
+    # Стани компаньйона
+    STATES = [
+        "idle",
+        "watching",
+        "click",
+        "window",
+        "thinking",
+        "surprised",
+        "happy",
+        "yawn",
+        "dragging"
+    ]
     
     def __init__(self, width: int = 120, height: int = 120):
         """Ініціалізація компаньйона"""
         self.width = width
         self.height = height
+        self.assets_dir = Path("assets/emotions")
+        
+        # Створити директорію для PNG емоцій
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+        print(f"📁 Директорія для емоцій: {self.assets_dir.absolute()}")
         
         # Основне вікно Tkinter
         self.root = tk.Tk()
@@ -48,10 +58,10 @@ class MiniCompanion:
         self.root.geometry(f"{width}x{height}+200+200")
         self.root.configure(bg="black")
         
-        # Етикетка з емодзі
+        # Етикетка для зображення або тексту
         self.label = tk.Label(
             self.root,
-            text=self.FACES["idle"],
+            text="🙂",
             font=("Segoe UI Emoji", 48),
             bg="black",
             fg="white",
@@ -60,69 +70,190 @@ class MiniCompanion:
         )
         self.label.pack(expand=True)
         
+        # Кешування зображень
+        self.images_cache: Dict[str, PhotoImage] = {}
+        self._load_images()
+        
         # Стан компаньйона
         self.state = "idle"
         self.state_changed_time = time.time()
         self.current_active_window: Optional[str] = None
         self.mouse_x = 0
         self.mouse_y = 0
+        self.companion_x = 200
+        self.companion_y = 200
         self.clicks_count = 0
         
-        print("✅ Mini Companion запущено")
-        print(f"📊 Python {sys.version}")
-        print("🎮 Рухай мишею та клікай!")
+        # Режим утримування (перетягування)
+        self.is_dragging = False
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.companion_drag_offset_x = 0
+        self.companion_drag_offset_y = 0
+        
+        # Слухачі миші
+        self.listener = None
+        
+        # Інформаційна панель
+        self._print_info()
+    
+    def _print_info(self) -> None:
+        """Вивести інформацію про запуск"""
+        print("\n" + "=" * 60)
+        print("🎮 Mini Companion для Python 3.14")
+        print("=" * 60)
+        print("📝 Налаштування:")
+        print(f"   • Розмір: {self.width}x{self.height} пікселів")
+        print(f"   • Директорія емоцій: {self.assets_dir.absolute()}")
+        print("=" * 60)
+        print("🎮 Керування:")
+        print("   • УТРИМУЙ компаньйона - переміщення")
+        print("   • ОТПУСТИ - компаньйон зупиняється")
+        print("   • Лівий клік - 😄 (реакція)")
+        print("   • Правий клік - 😮 (реакція)")
+        print("   • Зміна вікна - 🪟 (реакція)")
+        print("=" * 60)
+        print("📂 Розмісти PNG файли у папці 'assets/emotions/':")
+        print("   Приклади назв файлів:")
+        for state in self.STATES:
+            print(f"      • {state}.png")
+        print("=" * 60 + "\n")
+    
+    def _load_images(self) -> None:
+        """Завантажити PNG емоції з папки"""
+        print("🖼️  Завантаження емоцій...")
+        
+        for state in self.STATES:
+            image_path = self.assets_dir / f"{state}.png"
+            
+            if image_path.exists():
+                try:
+                    # Завантажити і перетворити зображення
+                    img = PhotoImage(file=str(image_path))
+                    
+                    # Масштабувати до розміру вікна (якщо потрібно)
+                    if img.width() != self.width or img.height() != self.height:
+                        img = img.subsample(
+                            max(1, img.width() // self.width),
+                            max(1, img.height() // self.height)
+                        )
+                    
+                    self.images_cache[state] = img
+                    print(f"   ✅ Завантажено: {state}.png")
+                
+                except Exception as e:
+                    print(f"   ❌ Помилка завантаження {state}.png: {e}")
+            else:
+                print(f"   ⚠️  Не знайдено: {state}.png")
+        
+        print(f"   📊 Всього завантажено: {len(self.images_cache)} емоцій\n")
     
     def set_state(self, new_state: str, duration: float = 1.2) -> None:
         """Встановити новий стан компаньйона"""
-        if new_state not in self.FACES:
+        if new_state not in self.STATES:
             print(f"⚠️  Невідомий стан: {new_state}")
             return
+        
+        if self.is_dragging and new_state != "dragging":
+            return  # Не змінювати стан під час перетягування
         
         self.state = new_state
         self.state_changed_time = time.time()
         
-        # Оновити емодзі
-        self.label.config(text=self.FACES[new_state])
+        # Використати PNG зображення якщо є, інакше використати емодзі
+        if new_state in self.images_cache:
+            self.label.config(image=self.images_cache[new_state], text="")
+        else:
+            # Fallback емодзі
+            fallback_faces = {
+                "idle": "🙂",
+                "watching": "👀",
+                "click": "😄",
+                "window": "🪟",
+                "thinking": "🤔",
+                "surprised": "😮",
+                "happy": "😊",
+                "yawn": "😴",
+                "dragging": "✋"
+            }
+            self.label.config(text=fallback_faces.get(new_state, "🙂"), image="")
         
-        # Повернути до idle після затримки
-        self.root.after(
-            int(duration * 1000),
-            lambda: self._restore_idle_if_needed(new_state, duration)
-        )
+        # Повернути до idle після затримки (якщо не перетягується)
+        if not self.is_dragging:
+            self.root.after(
+                int(duration * 1000),
+                lambda: self._restore_idle_if_needed(new_state, duration)
+            )
     
     def _restore_idle_if_needed(self, prev_state: str, duration: float) -> None:
         """Повернути до idle якщо стан не змінився"""
-        elapsed = time.time() - self.state_changed_time
-        if self.state == prev_state and elapsed >= duration - 0.1:
-            self.set_state("idle", 0.5)
+        if not self.is_dragging:
+            elapsed = time.time() - self.state_changed_time
+            if self.state == prev_state and elapsed >= duration - 0.1:
+                self.set_state("idle", 0.5)
     
     def on_move(self, x: int, y: int) -> None:
         """Реакція на рух миші"""
         self.mouse_x = x
         self.mouse_y = y
         
-        if self.state not in ["click", "surprised", "thinking"]:
-            self.set_state("watching", 0.3)
+        # Якщо перетягуємо компаньйона
+        if self.is_dragging:
+            new_x = x - self.companion_drag_offset_x
+            new_y = y - self.companion_drag_offset_y
+            
+            # Обмежити екраном
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            
+            new_x = max(0, min(new_x, screen_w - self.width))
+            new_y = max(0, min(new_y, screen_h - self.height))
+            
+            self.companion_x = new_x
+            self.companion_y = new_y
+            self.root.geometry(f"{self.width}x{self.height}+{new_x}+{new_y}")
+            
+            self.set_state("dragging")
     
     def on_click(self, x: int, y: int, button, pressed: bool) -> None:
         """Реакція на клік миші"""
-        if not pressed:
-            return
+        # Перевірити, чи клік на компаньйона
+        is_on_companion = (
+            self.companion_x <= x <= self.companion_x + self.width and
+            self.companion_y <= y <= self.companion_y + self.height
+        )
         
-        self.clicks_count += 1
-        button_name = str(button).split(".")[-1]
-        
-        if button_name == "left":
-            self.set_state("click", 0.6)
-            print(f"👆 Лівий клік! Всього кліків: {self.clicks_count}")
-        
-        elif button_name == "right":
-            self.set_state("surprised", 1.0)
-            print(f"🔧 Правий клік!")
-        
-        elif button_name == "middle":
-            self.set_state("happy", 0.8)
-            print(f"🎯 Середній клік!")
+        if pressed:
+            if is_on_companion:
+                # Почати перетягування
+                if str(button).split(".")[-1] == "left":
+                    self.is_dragging = True
+                    self.companion_drag_offset_x = x - self.companion_x
+                    self.companion_drag_offset_y = y - self.companion_y
+                    self.set_state("dragging")
+                    print("✋ Утримування...")
+            else:
+                # Клік поза компаньйоном
+                self.clicks_count += 1
+                button_name = str(button).split(".")[-1]
+                
+                if button_name == "left":
+                    self.set_state("click", 0.6)
+                    print(f"👆 Лівий клік! Всього кліків: {self.clicks_count}")
+                
+                elif button_name == "right":
+                    self.set_state("surprised", 1.0)
+                    print("🔧 Правий клік!")
+                
+                elif button_name == "middle":
+                    self.set_state("happy", 0.8)
+                    print("🎯 Середній клік!")
+        else:
+            # Випустити клавішу
+            if self.is_dragging:
+                self.is_dragging = False
+                print("🛑 Опущено")
+                self.set_state("idle")
     
     def window_watcher(self) -> None:
         """Стеження за активним вікном (фоновий потік)"""
@@ -149,36 +280,11 @@ class MiniCompanion:
                     else:
                         self.set_state("window", 1.0)
                 
-            except Exception as e:
-                # Мовчазно ігноруємо помилки
+            except Exception:
                 pass
             
             # Перевіряємо кожні 250 мс
             time.sleep(0.25)
-    
-    def update_position(self) -> None:
-        """Оновити позицію компаньйона біля курсора"""
-        # Позиція трохи праворуч від курсора
-        x = self.mouse_x + 30
-        y = self.mouse_y + 30
-        
-        # Обмеження екраном
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        
-        if x > screen_w - self.width:
-            x = screen_w - self.width
-        if y > screen_h - self.height:
-            y = screen_h - self.height
-        if x < 0:
-            x = 0
-        if y < 0:
-            y = 0
-        
-        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
-        
-        # Оновити позицію кожні 30 мс
-        self.root.after(30, self.update_position)
     
     def start(self) -> None:
         """Запустити компаньйона"""
@@ -197,28 +303,18 @@ class MiniCompanion:
             )
             self.window_thread.start()
         
-        # Оновлення позиції
-        self.root.after(30, self.update_position)
-        
         # Запуск основного цикла
         self.root.mainloop()
     
     def stop(self) -> None:
         """Зупинити компаньйона"""
-        self.listener.stop()
+        if self.listener:
+            self.listener.stop()
         self.root.quit()
 
 
 def main():
     """Головна функція"""
-    print("🎮 Mini Companion для Python 3.14")
-    print("=" * 50)
-    print("📝 Налаштування:")
-    print("   • Ширина: 120 пікселів")
-    print("   • Висота: 120 пікселів")
-    print("   • Стан: Активна стеження за мишею та вікнами")
-    print("=" * 50)
-    
     try:
         companion = MiniCompanion()
         companion.start()
@@ -226,6 +322,8 @@ def main():
         print("\n👋 До побачення!")
     except Exception as e:
         print(f"❌ Помилка: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
