@@ -1,12 +1,13 @@
 """
 Mini Companion - реагує на рухи миші та зміни вікна
 Сумісний з Python 3.14+
-Версія з PNG емоціями і режимом "утримування"
+Версія з вибором папки для PNG емоцій
 """
 
 import threading
 import time
 import tkinter as tk
+from tkinter import filedialog
 from tkinter import PhotoImage
 from pynput import mouse
 from typing import Optional, Dict
@@ -38,15 +39,22 @@ class MiniCompanion:
         "dragging"
     ]
     
-    def __init__(self, width: int = 120, height: int = 120):
+    def __init__(self, width: int = 120, height: int = 120, assets_dir: Optional[Path] = None):
         """Ініціалізація компаньйона"""
         self.width = width
         self.height = height
-        self.assets_dir = Path("assets/emotions")
         
-        # Створити директорію для PNG емоцій
-        self.assets_dir.mkdir(parents=True, exist_ok=True)
-        print(f"📁 Директорія для емоцій: {self.assets_dir.absolute()}")
+        # Вибір папки з емоціями
+        if assets_dir is None:
+            self.assets_dir = self._select_emotions_folder()
+        else:
+            self.assets_dir = Path(assets_dir)
+        
+        if self.assets_dir is None:
+            print("❌ Папка не вибрана. Вихід.")
+            sys.exit(0)
+        
+        print(f"📁 Директорія емоцій: {self.assets_dir.absolute()}")
         
         # Основне вікно Tkinter
         self.root = tk.Tk()
@@ -97,6 +105,28 @@ class MiniCompanion:
         # Інформаційна панель
         self._print_info()
     
+    def _select_emotions_folder(self) -> Optional[Path]:
+        """Вибрати папку з емоціями через діалог"""
+        print("\n" + "=" * 60)
+        print("🎨 Виберіть папку з PNG емоціями")
+        print("=" * 60)
+        
+        # Створити приховане вікно для діалогу
+        root = tk.Tk()
+        root.withdraw()
+        
+        folder_path = filedialog.askdirectory(
+            title="Виберіть папку з PNG емоціями для Mini Companion",
+            initialdir=str(Path.home())
+        )
+        
+        root.destroy()
+        
+        if folder_path:
+            return Path(folder_path)
+        else:
+            return None
+    
     def _print_info(self) -> None:
         """Вивести інформацію про запуск"""
         print("\n" + "=" * 60)
@@ -113,8 +143,7 @@ class MiniCompanion:
         print("   • Правий клік - 😮 (реакція)")
         print("   • Зміна вікна - 🪟 (реакція)")
         print("=" * 60)
-        print("📂 Розмісти PNG файли у папці 'assets/emotions/':")
-        print("   Приклади назв файлів:")
+        print("📂 Очікувані PNG файли у папці:")
         for state in self.STATES:
             print(f"      • {state}.png")
         print("=" * 60 + "\n")
@@ -123,30 +152,47 @@ class MiniCompanion:
         """Завантажити PNG емоції з папки"""
         print("🖼️  Завантаження емоцій...")
         
+        if not self.assets_dir.exists():
+            print(f"❌ Папка не існує: {self.assets_dir}")
+            return
+        
+        # Пошук усіх PNG файлів у папці
+        png_files = list(self.assets_dir.glob("*.png"))
+        
+        if not png_files:
+            print(f"⚠️  У папці {self.assets_dir} немає PNG файлів")
+            print("   Використовуватимуться стандартні емодзі")
+            return
+        
+        print(f"   📊 Знайдено PNG файлів: {len(png_files)}")
+        
         for state in self.STATES:
             image_path = self.assets_dir / f"{state}.png"
             
             if image_path.exists():
                 try:
-                    # Завантажити і перетворити зображення
+                    # Завантажити зображення
                     img = PhotoImage(file=str(image_path))
                     
                     # Масштабувати до розміру вікна (якщо потрібно)
-                    if img.width() != self.width or img.height() != self.height:
-                        img = img.subsample(
-                            max(1, img.width() // self.width),
-                            max(1, img.height() // self.height)
-                        )
+                    original_w = img.width()
+                    original_h = img.height()
+                    
+                    if original_w > self.width or original_h > self.height:
+                        scale_x = max(1, original_w // self.width)
+                        scale_y = max(1, original_h // self.height)
+                        scale = max(scale_x, scale_y)
+                        img = img.subsample(scale, scale)
                     
                     self.images_cache[state] = img
-                    print(f"   ✅ Завантажено: {state}.png")
+                    print(f"   ✅ Завантажено: {state}.png ({original_w}x{original_h})")
                 
                 except Exception as e:
                     print(f"   ❌ Помилка завантаження {state}.png: {e}")
             else:
                 print(f"   ⚠️  Не знайдено: {state}.png")
         
-        print(f"   📊 Всього завантажено: {len(self.images_cache)} емоцій\n")
+        print(f"   📊 Всього завантажено: {len(self.images_cache)}/{len(self.STATES)} емоцій\n")
     
     def set_state(self, new_state: str, duration: float = 1.2) -> None:
         """Встановити новий стан компаньйона"""
