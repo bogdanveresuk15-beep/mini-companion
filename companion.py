@@ -1,17 +1,11 @@
-"""
-Mini Companion - анімований компаньйон з підтримкою 20+ кадрів на емоцію
-Структура: emotions/idle/frame_00.png ... frame_19.png, тощо
-"""
-
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
-from tkinter import PhotoImage
-from pynput import mouse
-from typing import Optional, Dict, List
-import sys
+from tkinter import filedialog, PhotoImage
 from pathlib import Path
+from typing import Dict, List, Optional
+from pynput import mouse
+import sys
 
 try:
     import pygetwindow as gw
@@ -20,71 +14,96 @@ except ImportError:
     WINDOW_TRACKING = False
     print("⚠️  pygetwindow не встановлена. Стеження за вікнами вимкнено.")
 
+WINDOW_KEYWORDS = {
+    "browser": ["chrome", "firefox", "edge", "opera", "brave", "browser"],
+    "editor": ["code", "visual studio", "sublime", "notepad", "pycharm", "vscode", "editor"],
+    "chat": ["discord", "telegram", "slack", "teams", "messenger", "signal", "chat"],
+    "default": []
+}
+
+STATES = [
+    "idle",
+    "watching",
+    "click",
+    "window",
+    "thinking",
+    "surprised",
+    "happy",
+    "yawn",
+    "dragging"
+]
+
+FALLBACK_EMOJIS = {
+    "idle": "🙂",
+    "watching": "👀",
+    "click": "😄",
+    "window": "🪟",
+    "thinking": "🤔",
+    "surprised": "😮",
+    "happy": "😊",
+    "yawn": "😴",
+    "dragging": "✋",
+}
+
+DURATION_BY_STATE = {
+    "idle": 2.5,
+    "watching": 2.0,
+    "click": 0.8,
+    "window": 1.5,
+    "thinking": 2.0,
+    "surprised": 1.0,
+    "happy": 1.8,
+    "yawn": 2.0,
+    "dragging": 0.1,
+}
+
+FPS_BY_STATE = {
+    "idle": 10,
+    "watching": 10,
+    "click": 12,
+    "window": 10,
+    "thinking": 10,
+    "surprised": 12,
+    "happy": 10,
+    "yawn": 8,
+    "dragging": 8,
+}
+
 
 class AnimationPlayer:
-    """Плеєр для циклічної анімації"""
     def __init__(self, frames: List[PhotoImage], fps: int = 10):
         self.frames = frames
-        self.fps = fps  # кадрів на секунду
-        self.frame_delay = int(1000 / fps)  # затримка між кадрами в мс
-        self.current_frame = 0
-        self.is_playing = False
-
-    def get_current_frame(self) -> Optional[PhotoImage]:
-        if not self.frames:
-            return None
-        return self.frames[self.current_frame]
-
-    def next_frame(self) -> Optional[PhotoImage]:
-        if not self.frames:
-            return None
-        self.current_frame = (self.current_frame + 1) % len(self.frames)
-        return self.frames[self.current_frame]
+        self.fps = fps
+        self.delay = int(1000 / fps)
+        self.index = 0
 
     def reset(self):
-        self.current_frame = 0
+        self.index = 0
 
-    def get_delay(self) -> int:
-        """Повернути затримку до наступного кадру в мс"""
-        return self.frame_delay
+    def current(self):
+        if not self.frames:
+            return None
+        return self.frames[self.index]
+
+    def next(self):
+        if not self.frames:
+            return None
+        frame = self.frames[self.index]
+        self.index = (self.index + 1) % len(self.frames)
+        return frame
 
 
 class MiniCompanion:
-    STATES = [
-        "idle",
-        "watching",
-        "click",
-        "window",
-        "thinking",
-        "surprised",
-        "happy",
-        "yawn",
-        "dragging"
-    ]
-
-    # Стандартні затримки для кожної емоції (в секундах)
-    STATE_DURATIONS = {
-        "idle": 3.0,          # idle циклює весь час
-        "watching": 2.0,
-        "click": 0.6,
-        "window": 1.5,
-        "thinking": 2.0,
-        "surprised": 1.0,
-        "happy": 1.5,
-        "yawn": 2.0,
-        "dragging": 0.1       # під час перетягування
-    }
-
-    def __init__(self, width: int = 120, height: int = 120, anim_root: Optional[Path] = None):
+    def __init__(self, width: int = 120, height: int = 120, emotions_root: Optional[Path] = None):
         self.width = width
         self.height = height
 
-        if anim_root is None:
-            self.anim_root = self._select_anim_folder()
+        if emotions_root is None:
+            self.emotions_root = self._select_folder()
         else:
-            self.anim_root = Path(anim_root)
+            self.emotions_root = Path(emotions_root)
 
-        if self.anim_root is None:
+        if self.emotions_root is None:
             print("❌ Папка з анімаціями не вибрана. Вихід.")
             sys.exit(0)
 
@@ -108,35 +127,40 @@ class MiniCompanion:
         )
         self.label.pack(expand=True)
 
-        # Кеш анімацій
-        self.animation_players: Dict[str, AnimationPlayer] = {}
+        self.animation_cache: Dict[str, Dict[str, List[PhotoImage]]] = {}
+        self.animation_player: Optional[AnimationPlayer] = None
         self.current_state = "idle"
-        self.animation_id = None  # ID таймера для анімації
-
-        self.load_animations()
-
-        self.state_changed_time = time.time()
-        self.current_active_window: Optional[str] = None
-        self.mouse_x = 0
-        self.mouse_y = 0
-        self.companion_x = 200
-        self.companion_y = 200
-        self.clicks_count = 0
+        self.current_window_type = "default"
+        self.current_window_title = "default"
+        self.animation_timer_id = None
 
         self.is_dragging = False
-        self.companion_drag_offset_x = 0
-        self.companion_drag_offset_y = 0
+        self.mouse_pressed_on_companion = False
+        self.click_start_x = 0
+        self.click_start_y = 0
+        self.click_start_time = 0.0
+        self.drag_threshold = 12
+        self.last_click_reaction_time = 0.0
+        self.click_reaction_cooldown = 0.75
+
+        self.companion_x = 200
+        self.companion_y = 200
+        self.drag_offset_x = 0
+        self.drag_offset_y = 0
+
+        self.clicks_count = 0
+        self.current_active_window: Optional[str] = None
 
         self.listener = None
 
+        self.load_animations()
         self._print_info()
 
-    def _select_anim_folder(self) -> Optional[Path]:
-        """Вибрати папку з анімаціями через діалог"""
+    def _select_folder(self) -> Optional[Path]:
         root = tk.Tk()
         root.withdraw()
         folder = filedialog.askdirectory(
-            title="Виберіть папку з анімаціями для компаньйона",
+            title="Виберіть папку з анімаціями компаньйона",
             initialdir=str(Path.home())
         )
         root.destroy()
@@ -146,173 +170,189 @@ class MiniCompanion:
         return None
 
     def _print_info(self):
-        """Вивести інформацію про запуск"""
-        print("\n" + "=" * 70)
-        print("🎮 Mini Companion - Анімований компаньйон")
-        print("=" * 70)
-        print("📁 Папка з анімаціями:")
-        print(f"   {self.anim_root}")
-        print("\n📂 Очікувана структура:")
-        print("   my_emotions/")
-        for state in self.STATES:
-            print(f"      {state}/")
-            print(f"         frame_00.png")
-            print(f"         frame_01.png")
-            print(f"         ...")
-            print(f"         frame_19.png  (мінімум 20 кадрів)")
-        print("\n🎯 Керування:")
-        print("   • УТРИМУЙ мишею - перетягування")
-        print("   • ОТПУСТИ - компаньйон зупиняється")
-        print("   • Лівий клік - 😄 реакція")
-        print("   • Правий клік - 😮 реакція")
-        print("   • Зміна вікна - 🪟 реакція")
-        print("\n⚙️ Налаштування анімації:")
-        print("   • FPS: 10 кадрів/сек (100мс на кадр)")
-        print("   • На 20 кадрів = ~2 секунди анімації")
-        print("=" * 70 + "\n")
+        print("\n" + "=" * 80)
+        print("🎮 Mini Companion — анімації на емоції + типи вікон")
+        print("=" * 80)
+        print(f"📁 Користувацька папка: {self.emotions_root}")
+        print("Структура:")
+        print("  emotions/")
+        for state in STATES:
+            print(f"    {state}/")
+            print("      default/")
+            print("      browser/")
+            print("      editor/")
+            print("      chat/")
+        print("=" * 80)
+        print("🎯 Керування:")
+        print("  • Утримуй ЛКМ — перетягування")
+        print("  • Відпусти — зупинити")
+        print("  • Клік по компаньйону — одиночна реакція (тільки в idle)")
+        print("  • Клік поза компаньйоном — ігнорується")
+        print("  • Зміна активного вікна — реакція (тільки в idle)")
+        print("=" * 80)
+
+    def detect_window_type(self, title: str) -> str:
+        text = title.lower()
+
+        for kind, keywords in WINDOW_KEYWORDS.items():
+            if kind == "default":
+                continue
+            if any(keyword in text for keyword in keywords):
+                return kind
+
+        return "default"
 
     def load_animations(self):
-        """Завантажити анімації з папок"""
         print("🖼️  Завантаження анімацій...")
-        if not self.anim_root.exists():
-            print(f"❌ Папка не існує: {self.anim_root}")
+        if not self.emotions_root.exists():
+            print(f"❌ Папка не існує: {self.emotions_root}")
             return
 
         total_loaded = 0
 
-        for state in self.STATES:
-            folder = self.anim_root / state
-            if not folder.exists():
-                print(f"⚠️  Папка '{state}' не знайдена.")
+        for state in STATES:
+            state_dir = self.emotions_root / state
+            if not state_dir.exists():
+                print(f"⚠️  Папка '{state}' відсутня.")
                 continue
 
-            frames = []
-            
-            # Пошук PNG файлів з сортуванням за номером
-            pngs = sorted(folder.glob("frame_*.png"))
-            if not pngs:
-                pngs = sorted(folder.glob("*.png"))
-            
-            if not pngs:
-                print(f"⚠️  У папці '{state}' немає PNG файлів.")
-                continue
+            self.animation_cache[state] = {}
 
-            # Завантажити кожен кадр
-            for i, path in enumerate(pngs):
-                try:
-                    image = PhotoImage(file=str(path))
-                    frames.append(image)
-                except Exception as e:
-                    print(f"❌ Помилка завантаження {path.name}: {e}")
-                    continue
+            variants = [p for p in state_dir.iterdir() if p.is_dir()]
+            if not variants:
+                variants = [state_dir]
 
-            if frames:
-                # FPS = 10 означає 100мс на кадр
-                player = AnimationPlayer(frames, fps=10)
-                self.animation_players[state] = player
-                total_loaded += 1
-                print(f"   ✅ '{state}': {len(frames)} кадрів завантажено ({len(frames) / 10:.1f}с анімації)")
-            else:
-                print(f"   ❌ '{state}': кадри не завантажились.")
+            for variant in variants:
+                variant_name = variant.name if variant.is_dir() else "default"
+                frames = []
+                for path in sorted(variant.glob("frame_*.png")):
+                    try:
+                        img = PhotoImage(file=str(path))
+                        frames.append(img)
+                    except Exception as e:
+                        print(f"❌ Не вдалось завантажити {path}: {e}")
 
-        print(f"\n📊 Всього емоцій завантажено: {total_loaded}/{len(self.STATES)}")
+                if frames:
+                    self.animation_cache[state][variant_name] = frames
+                    print(f"   ✅ {state}/{variant_name}: {len(frames)} кадрів")
+                    total_loaded += 1
+
+        print(f"\n📊 Завантажено: {total_loaded} анімаційних варіантів")
         if total_loaded == 0:
-            print("⚠️  Будуть використовуватися стандартні емодзі.\n")
-        else:
-            print()
+            print("⚠️  Немає анімацій — будуть використовуватися стандартні емодзі.\n")
+
+    def _choose_frames_for_state(self, state: str, window_title: str) -> List[PhotoImage]:
+        window_type = self.detect_window_type(window_title)
+        variant_map = self.animation_cache.get(state, {})
+
+        if window_type in variant_map and variant_map[window_type]:
+            return variant_map[window_type]
+
+        if "default" in variant_map and variant_map["default"]:
+            return variant_map["default"]
+
+        for frames in variant_map.values():
+            if frames:
+                return frames
+
+        return []
+
+    def _show_fallback_emoji(self):
+        self.label.config(
+            text=FALLBACK_EMOJIS.get(self.current_state, "🙂"),
+            image=""
+        )
 
     def _show_current_frame(self):
-        """Показати поточний кадр анімації"""
-        if self.current_state in self.animation_players:
-            player = self.animation_players[self.current_state]
-            frame = player.get_current_frame()
-            if frame:
-                self.label.config(image=frame, text="")
-                return
+        if self.animation_player is None:
+            self._show_fallback_emoji()
+            return
 
-        # Fallback на емодзі
-        fallback_faces = {
-            "idle": "🙂",
-            "watching": "👀",
-            "click": "😄",
-            "window": "🪟",
-            "thinking": "🤔",
-            "surprised": "😮",
-            "happy": "😊",
-            "yawn": "😴",
-            "dragging": "✋"
-        }
-        self.label.config(text=fallback_faces.get(self.current_state, "🙂"), image="")
+        frame = self.animation_player.current()
+        if frame is not None:
+            self.label.config(image=frame, text="")
+            return
+
+        self._show_fallback_emoji()
 
     def _animate_loop(self):
-        """Основний цикл анімації"""
-        if self.current_state not in self.animation_players:
-            # Якщо немає анімації — залишити на першому кадрі
-            self._show_current_frame()
-            return
-
-        player = self.animation_players[self.current_state]
-        
-        # Показати поточний кадр
-        self._show_current_frame()
-        
-        # Перейти до наступного кадру
-        player.next_frame()
-        
-        # Запланувати наступний кадр
-        delay = player.get_delay()
-        self.animation_id = self.root.after(delay, self._animate_loop)
-
-    def set_state(self, new_state: str, duration: float = None):
-        """Встановити новий стан з анімацією"""
-        if new_state not in self.STATES:
-            return
-
-        if self.is_dragging and new_state != "dragging":
-            return
-
-        # Скасувати попередній таймер анімації
-        if self.animation_id is not None:
-            self.root.after_cancel(self.animation_id)
-            self.animation_id = None
-
-        self.current_state = new_state
-        self.state_changed_time = time.time()
-
-        # Взяти тривалість з налаштувань або параметра
-        if duration is None:
-            duration = self.STATE_DURATIONS.get(new_state, 2.0)
-
-        # Скинути анімацію на початок
-        if self.current_state in self.animation_players:
-            self.animation_players[self.current_state].reset()
-
-        # Запустити анімацію
-        self._animate_loop()
-
-        # Якщо не перетягується — повернути до idle після тривалості
-        if not self.is_dragging and new_state != "idle":
-            self.root.after(
-                int(duration * 1000),
-                lambda: self._restore_idle_if_needed(new_state, duration)
-            )
-
-    def _restore_idle_if_needed(self, prev_state: str, duration: float):
-        """Повернути до idle якщо стан не змінився"""
         if self.is_dragging:
             return
-        elapsed = time.time() - self.state_changed_time
-        if self.current_state == prev_state and elapsed >= duration - 0.1:
-            self.set_state("idle")
+
+        if self.animation_player is None:
+            self._show_fallback_emoji()
+            return
+
+        frame = self.animation_player.next()
+        if frame is not None:
+            self.label.config(image=frame, text="")
+        else:
+            self._show_fallback_emoji()
+
+        delay = 1000 // FPS_BY_STATE.get(self.current_state, 10)
+        self.animation_timer_id = self.root.after(delay, self._animate_loop)
+
+    def set_state(self, state: str, duration: Optional[float] = None, window_title: Optional[str] = None):
+        if state not in STATES:
+            return
+
+        if self.is_dragging and state != "dragging":
+            return
+
+        if self.animation_timer_id is not None:
+            self.root.after_cancel(self.animation_timer_id)
+            self.animation_timer_id = None
+
+        self.current_state = state
+        if window_title:
+            self.current_window_title = window_title
+        else:
+            self.current_window_title = self.current_window_title or "default"
+
+        self.current_window_type = self.detect_window_type(self.current_window_title)
+        frames = self._choose_frames_for_state(state, self.current_window_title)
+
+        if frames:
+            self.animation_player = AnimationPlayer(frames, fps=FPS_BY_STATE.get(state, 10))
+            self.animation_player.reset()
+            self._show_current_frame()
+            self.animation_timer_id = self.root.after(100, self._animate_loop)
+        else:
+            self.animation_player = None
+            self._show_fallback_emoji()
+
+        if not self.is_dragging and state != "idle":
+            duration_value = duration if duration is not None else DURATION_BY_STATE.get(state, 1.5)
+            self.root.after(
+                int(duration_value * 1000),
+                lambda: self._restore_idle_if_needed(state)
+            )
+
+    def _restore_idle_if_needed(self, prev_state: str):
+        if self.is_dragging:
+            return
+
+        if self.current_state == prev_state:
+            self.set_state("idle", duration=DURATION_BY_STATE.get("idle", 2.5), window_title=self.current_window_title)
 
     def on_move(self, x: int, y: int):
-        """Реакція на рух миші"""
         self.mouse_x = x
         self.mouse_y = y
 
+        if self.mouse_pressed_on_companion and not self.is_dragging:
+            movement_x = abs(x - self.click_start_x)
+            movement_y = abs(y - self.click_start_y)
+
+            if movement_x > self.drag_threshold or movement_y > self.drag_threshold:
+                self.is_dragging = True
+                self.drag_offset_x = x - self.companion_x
+                self.drag_offset_y = y - self.companion_y
+                self.set_state("dragging", duration=0.1, window_title=self.current_window_title)
+                print("✋ Почали перетягування")
+
         if self.is_dragging:
-            new_x = x - self.companion_drag_offset_x
-            new_y = y - self.companion_drag_offset_y
+            new_x = x - self.drag_offset_x
+            new_y = y - self.drag_offset_y
 
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
@@ -323,49 +363,57 @@ class MiniCompanion:
             self.companion_x = new_x
             self.companion_y = new_y
             self.root.geometry(f"{self.width}x{self.height}+{new_x}+{new_y}")
-            
-            # Показати dragging без зміни стану
+
             if self.current_state != "dragging":
-                self.set_state("dragging", 0.1)
+                self.set_state("dragging", duration=0.1, window_title=self.current_window_title)
 
     def on_click(self, x: int, y: int, button, pressed: bool):
-        """Реакція на клік миші"""
         is_on_companion = (
             self.companion_x <= x <= self.companion_x + self.width and
             self.companion_y <= y <= self.companion_y + self.height
         )
 
-        if pressed:
-            if is_on_companion and str(button).split(".")[-1] == "left":
-                # Почати перетягування
-                self.is_dragging = True
-                self.companion_drag_offset_x = x - self.companion_x
-                self.companion_drag_offset_y = y - self.companion_y
-                self.set_state("dragging", 0.1)
-                print("✋ Утримування...")
-            else:
-                # Клік поза компаньйоном
-                self.clicks_count += 1
-                button_name = str(button).split(".")[-1]
+        if not is_on_companion:
+            return
 
-                if button_name == "left":
-                    self.set_state("click", 0.6)
-                    print(f"👆 Лівий клік! Всього: {self.clicks_count}")
-                elif button_name == "right":
-                    self.set_state("surprised", 1.0)
-                    print("🔧 Правий клік!")
-                elif button_name == "middle":
-                    self.set_state("happy", 0.8)
-                    print("🎯 Середній клік!")
-        else:
-            # Відпустити клавішу
-            if self.is_dragging:
-                self.is_dragging = False
-                self.set_state("idle")
-                print("🛑 Опущено")
+        button_name = str(button).split(".")[-1]
+
+        if pressed:
+            if button_name == "left":
+                self.mouse_pressed_on_companion = True
+                self.click_start_x = x
+                self.click_start_y = y
+                self.click_start_time = time.time()
+                return
+
+        if not pressed:
+            if self.mouse_pressed_on_companion:
+                self.mouse_pressed_on_companion = False
+
+                press_duration = time.time() - self.click_start_time
+                movement_x = abs(x - self.click_start_x)
+                movement_y = abs(y - self.click_start_y)
+
+                # РЕАКЦІЯ НА КЛІК ТІЛЬКИ КОЛИ В IDLE
+                if press_duration < 0.5 and movement_x < self.drag_threshold and movement_y < self.drag_threshold:
+                    if self.current_state == "idle":  # ← ДОДАНО
+                        now = time.time()
+                        if now - self.last_click_reaction_time >= self.click_reaction_cooldown:
+                            self.last_click_reaction_time = now
+                            self.set_state("click", duration=0.7, window_title=self.current_window_title)
+                            print("👆 Одинарний клік по компаньйону (в idle)")
+                            return
+                    else:
+                        print(f"⏸️ Клік проігнорований (компаньйон в стані {self.current_state})")
+                        return
+
+                if self.is_dragging:
+                    self.is_dragging = False
+                    self.set_state("idle", duration=2.5, window_title=self.current_window_title)
+                    print("🛑 Відпустили компаньйона")
+                    return
 
     def window_watcher(self):
-        """Стеження за активним вікном (фоновий потік)"""
         if not WINDOW_TRACKING:
             return
 
@@ -373,59 +421,47 @@ class MiniCompanion:
             try:
                 window = gw.getActiveWindow()
                 title = window.title if window else "Без активного вікна"
-
                 if title != self.current_active_window:
                     self.current_active_window = title
-                    print(f"🪟 Активне вікно: {title[:50]}")
+                    self.current_window_title = title
 
-                    # Різні реакції на різні додатки
-                    if any(app in title.lower() for app in ["chrome", "firefox", "edge"]):
-                        self.set_state("thinking", 2.0)
-                    elif any(app in title.lower() for app in ["code", "studio", "sublime"]):
-                        self.set_state("thinking", 2.0)
-                    elif any(app in title.lower() for app in ["discord", "telegram", "slack"]):
-                        self.set_state("happy", 1.5)
+                    detected = self.detect_window_type(title)
+                    print(f"🪟 Активне вікно: {title[:60]} | тип: {detected}")
+
+                    # РЕАКЦІЯ НА ВІКНА ТІЛЬКИ КОЛИ В IDLE
+                    if self.current_state == "idle":  # ← ДОДАНО
+                        if any(keyword in title.lower() for keyword in ["chrome", "firefox", "edge", "opera", "brave"]):
+                            self.set_state("thinking", duration=2.0, window_title=title)
+                        elif any(keyword in title.lower() for keyword in ["code", "visual studio", "sublime", "notepad", "pycharm", "vscode"]):
+                            self.set_state("window", duration=1.5, window_title=title)
+                        elif any(keyword in title.lower() for keyword in ["discord", "telegram", "slack", "teams", "messenger", "signal"]):
+                            self.set_state("happy", duration=1.8, window_title=title)
+                        else:
+                            self.set_state("window", duration=1.5, window_title=title)
                     else:
-                        self.set_state("window", 1.5)
+                        print(f"   ⏸️ Реакція на вікно пропущена (в стані {self.current_state})")
+
             except Exception:
                 pass
 
             time.sleep(0.25)
 
     def start(self):
-        """Запустити компаньйона"""
-        # Слухач миші
         self.listener = mouse.Listener(
             on_move=self.on_move,
             on_click=self.on_click
         )
         self.listener.start()
 
-        # Потік стеження за вікнами
         if WINDOW_TRACKING:
-            self.window_thread = threading.Thread(
-                target=self.window_watcher,
-                daemon=True
-            )
+            self.window_thread = threading.Thread(target=self.window_watcher, daemon=True)
             self.window_thread.start()
 
-        # Запустити начальну анімацію
-        self.set_state("idle")
-
-        # Запуск основного цикла Tkinter
+        self.set_state("idle", duration=2.5, window_title="default")
         self.root.mainloop()
-
-    def stop(self):
-        """Зупинити компаньйона"""
-        if self.listener:
-            self.listener.stop()
-        if self.animation_id:
-            self.root.after_cancel(self.animation_id)
-        self.root.quit()
 
 
 def main():
-    """Головна функція"""
     try:
         companion = MiniCompanion()
         companion.start()
@@ -433,8 +469,6 @@ def main():
         print("\n👋 До побачення!")
     except Exception as e:
         print(f"❌ Помилка: {e}")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 
